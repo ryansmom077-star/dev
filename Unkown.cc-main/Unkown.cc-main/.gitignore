@@ -1,0 +1,8 @@
+node_modules/
+dist/
+server/node_modules/
+vue-project/node_modules/
+.vue/
+.DS_Store
+.env
+.env.*

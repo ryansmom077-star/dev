@@ -1,0 +1,18 @@
+{
+  "adminIps": [
+    "127.0.0.1",
+    "::1",
+    "192.168.22.154"
+  ],
+  "email": {
+    "smtp": {
+      "host": "",
+      "port": 587,
+      "secure": false,
+      "user": "",
+      "pass": "",
+      "from": "no-reply@example.com"
+    }
+  },
+  "description": "Add your IP address to adminIps to automatically become staff on register/login"
+}

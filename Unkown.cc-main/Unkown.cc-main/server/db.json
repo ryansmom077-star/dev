@@ -1,0 +1,224 @@
+{
+  "uidCounter": 2,
+  "forumStatus": {
+    "isOpen": true
+  },
+  "accountLogs": [],
+  "stripeConfig": {
+    "apiKey": "",
+    "publishableKey": ""
+  },
+  "tos": {
+    "title": "Terms of Service",
+    "content": "By using this platform, you agree to our terms and conditions. Please read carefully.",
+    "lastUpdated": 1707500000000
+  },
+  "products": [
+    {
+      "id": "prod_1",
+      "name": "Premium Access",
+      "description": "Get full access to all premium features",
+      "price": 999,
+      "currency": "USD",
+      "createdAt": 1707500000000
+    },
+    {
+      "id": "prod_2",
+      "name": "VIP Membership",
+      "description": "Exclusive VIP benefits and support",
+      "price": 2999,
+      "currency": "USD",
+      "createdAt": 1707500000000
+    }
+  ],
+  "orders": [
+    {
+      "id": "FqAEJuOPFfXQsSddV1qQ2",
+      "productId": "prod_1",
+      "productName": "Premium Access",
+      "price": 999,
+      "currency": "USD",
+      "userId": "admin_user_001",
+      "paymentIntentId": "pi_dummy_1770746299903",
+      "status": "completed",
+      "tosAccepted": true,
+      "tosSignature": "ryan",
+      "createdAt": 1770746299911
+    }
+  ],
+  "ranks": [
+    {
+      "id": "rank_beta",
+      "name": "Beta Tester",
+      "color": "#FF6B6B",
+      "permissions": {
+        "forum_access": true,
+        "create_threads": true,
+        "create_posts": true,
+        "delete_own_posts": true,
+        "view_tickets": false,
+        "create_tickets": false,
+        "ban_users": false,
+        "delete_posts": false,
+        "delete_threads": false,
+        "manage_forum": false
+      },
+      "createdAt": 1707500000000
+    },
+    {
+      "id": "rank_mod",
+      "name": "Moderator",
+      "color": "#4ECDC4",
+      "permissions": {
+        "forum_access": true,
+        "create_threads": true,
+        "create_posts": true,
+        "delete_own_posts": true,
+        "view_tickets": true,
+        "create_tickets": true,
+        "ban_users": false,
+        "delete_posts": true,
+        "delete_threads": true,
+        "manage_forum": false
+      },
+      "createdAt": 1707500000000
+    },
+    {
+      "id": "rank_dd-_tq4rUeVXgMddKJNbv",
+      "name": "Manager",
+      "color": "#7875ff",
+      "permissions": {
+        "forum_access": true,
+        "create_threads": true,
+        "create_posts": true,
+        "delete_own_posts": true,
+        "view_tickets": false,
+        "create_tickets": false,
+        "ban_users": false,
+        "delete_posts": false,
+        "delete_threads": false,
+        "manage_forum": false
+      },
+      "createdAt": 1770751944055
+    }
+  ],
+  "forumCategories": [
+    {
+      "id": "cat_cs2",
+      "name": "CS2",
+      "description": "Counter-Strike 2 discussions",
+      "color": "#FF6B6B",
+      "order": 1
+    },
+    {
+      "id": "cat_news",
+      "name": "News",
+      "description": "Latest news and updates",
+      "color": "#00ff88",
+      "order": 2
+    },
+    {
+      "id": "cat_media",
+      "name": "Media",
+      "description": "Media uploads and sharing",
+      "color": "#00ffcc",
+      "order": 3
+    }
+  ],
+  "forums": [
+    {
+      "id": "forum_general",
+      "categoryId": "cat_cs2",
+      "name": "General Discussion",
+      "description": "General CS2 discussions",
+      "createdBy": "admin_user_001",
+      "createdAt": 1707500000000,
+      "threadCount": 0
+    },
+    {
+      "id": "forum_trading",
+      "categoryId": "cat_cs2",
+      "name": "Trading",
+      "description": "Buy and sell skins",
+      "createdBy": "admin_user_001",
+      "createdAt": 1707500000000,
+      "threadCount": 0
+    }
+  ],
+  "users": [
+    {
+      "id": "admin_user_001",
+      "uid": 1,
+      "username": "Sophie.dma",
+      "email": "sophie@example.com",
+      "passwordHash": "$2b$10$VRqxI/wt0pbjQwvBlQUXJOTG6VPXz3Yc/CXzJrse.YE4z3FRu40mC",
+      "role": "staff",
+      "staffRole": "admin",
+      "banned": false,
+      "registeredIp": "127.0.0.1",
+      "lastIp": "::1",
+      "ips": [
+        {
+          "ip": "127.0.0.1",
+          "timestamp": 1707500000000
+        },
+        {
+          "ip": "::1",
+          "timestamp": 1770708398922
+        },
+        {
+          "ip": "::1",
+          "timestamp": 1770742384928
+        },
+        {
+          "ip": "::1",
+          "timestamp": 1770744923707
+        },
+        {
+          "ip": "::1",
+          "timestamp": 1770745210545
+        },
+        {
+          "ip": "::1",
+          "timestamp": 1770748528371
+        },
+        {
+          "ip": "::1",
+          "timestamp": 1770751907562
+        }
+      ],
+      "profile": {
+        "pfp": "/uploads/pfp_pc2oWEzYjlEmQB3F1s1se.webp",
+        "banner": null,
+        "background": null,
+        "signature": "",
+        "customRank": null,
+        "bio": "ss"
+      },
+      "twoFa": {
+        "enabled": false,
+        "code": null,
+        "codeExpiry": null
+      },
+      "createdAt": 1707500000000,
+      "roles": [
+        "role_admin"
+      ]
+    }
+  ],
+  "threads": [],
+  "posts": [],
+  "keys": [],
+  "tickets": [
+    {
+      "id": "OTyt5d-jqL8yVUQwaYujU",
+      "subject": "hi",
+      "description": "hi",
+      "category": "account",
+      "status": "open",
+      "createdBy": "admin_user_001",
+      "createdAt": 1770746330928,
+      "responses": []
+    }
+  ]
+}
