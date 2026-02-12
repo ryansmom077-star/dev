@@ -908,7 +908,24 @@ app.post('/api/admin/users/create', authMiddleware, async (req, res) => {
 
 // Change user UID (with swap if taken)
 app.post('/api/admin/users/:userId/change-uid', authMiddleware, async (req, res) => {
-  if (req.user.staffRole !== 'admin') return res.status(403).json({ error: 'admin only' })
+  // Check if user is admin or has change_uid permission via role
+  const isAdmin = req.user.staffRole === 'admin'
+  let hasPermission = isAdmin
+  
+  if (!hasPermission && req.user.roles && req.user.roles.length > 0) {
+    await db.read()
+    const roleIds = req.user.roles.filter(r => typeof r === 'string')
+    for (const roleId of roleIds) {
+      const role = db.data.roles?.find(r => r.id === roleId)
+      if (role?.permissions?.change_uid) {
+        hasPermission = true
+        break
+      }
+    }
+  }
+  
+  if (!hasPermission && !isAdmin) return res.status(403).json({ error: 'change_uid permission required' })
+  
   const { newUid } = req.body
   if (!newUid || typeof newUid !== 'number') return res.status(400).json({ error: 'valid newUid required' })
 

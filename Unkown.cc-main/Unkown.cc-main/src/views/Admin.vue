@@ -45,7 +45,8 @@ const rankPermissions = ref({
   ban_users: false,
   delete_posts: false,
   delete_threads: false,
-  manage_forum: false
+  manage_forum: false,
+  change_uid: false
 })
 
 const selectedRankForPermissions = ref(null)
@@ -281,7 +282,7 @@ async function setStaffRole(userId, staffRole) {
 }
 
 async function changeUID(userId) {
-  if (!isAdmin) return alert('Admin only')
+  if (!isStaff) return alert('Staff only')
   const user = users.value.find(u => u.id === userId)
   if (!user) return
   
@@ -556,7 +557,8 @@ async function createRank() {
       ban_users: false,
       delete_posts: false,
       delete_threads: false,
-      manage_forum: false
+      manage_forum: false,
+      change_uid: false
     }
     await loadRanks()
   } catch (err) {
@@ -879,9 +881,9 @@ onMounted(loadData)
                           <button v-if="isAdmin" @click="setStaffRole(usr.id, 'admin')" style="display:block;width:100%;text-align:left;padding:8px 10px;background:transparent;border:none;color:#d9eef5;cursor:pointer">Make Admin</button>
                           <button v-if="isAdmin" @click="setStaffRole(usr.id, 'manager')" style="display:block;width:100%;text-align:left;padding:8px 10px;background:transparent;border:none;color:#d9eef5;cursor:pointer">Make Manager</button>
                           <button v-if="isAdmin" @click="setStaffRole(usr.id, null)" style="display:block;width:100%;text-align:left;padding:8px 10px;background:transparent;border:none;color:#d9eef5;cursor:pointer">Remove Staff</button>
-                          <button v-if="isAdmin" @click="changeUID(usr.id); closeUserMenu()" style="display:block;width:100%;text-align:left;padding:8px 10px;background:transparent;border:none;color:#00ffcc;cursor:pointer">Change UID</button>
-                          <button v-if="isAdmin" @click="generateInviteKey(); closeUserMenu()" style="display:block;width:100%;text-align:left;padding:8px 10px;background:transparent;border:none;color:#00ff88;cursor:pointer">Generate Invite Key</button>
-                          <button v-if="isAdmin" @click="banUser(usr.id); closeUserMenu()" style="display:block;width:100%;text-align:left;padding:8px 10px;background:transparent;border:none;color:#ff6b6b;cursor:pointer">
+                          <button v-if="isStaff" @click="changeUID(usr.id); closeUserMenu()" style="display:block;width:100%;text-align:left;padding:8px 10px;background:transparent;border:none;color:#00ffcc;cursor:pointer">Change UID</button>
+                          <button v-if="isStaff" @click="generateInviteKey(); closeUserMenu()" style="display:block;width:100%;text-align:left;padding:8px 10px;background:transparent;border:none;color:#00ff88;cursor:pointer">Generate Invite Key</button>
+                          <button v-if="isStaff" @click="banUser(usr.id); closeUserMenu()" style="display:block;width:100%;text-align:left;padding:8px 10px;background:transparent;border:none;color:#ff6b6b;cursor:pointer">
                             {{ usr.banned ? 'Unban' : 'Ban' }}
                           </button>
                         </div>
@@ -1057,6 +1059,10 @@ onMounted(loadData)
                 <label style="display:flex;align-items:center;gap:8px;color:#ff6b6b;cursor:pointer">
                   <input type="checkbox" v-model="rank.permissions.manage_forum" @change="updateRankPermissions(rank.id)" />
                   Manage Forum
+                </label>
+                <label style="display:flex;align-items:center;gap:8px;color:#00ffcc;cursor:pointer">
+                  <input type="checkbox" v-model="rank.permissions.change_uid" @change="updateRankPermissions(rank.id)" />
+                  Change User UID
                 </label>
               </div>
             </div>
