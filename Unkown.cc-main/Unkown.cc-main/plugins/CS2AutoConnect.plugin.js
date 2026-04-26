@@ -1,11 +1,24 @@
 /**
  * @name CS2AutoConnect
  * @author codex + upgraded
- * @version 8.1.0
+ * @version 8.2.0
  * @description Ultra reliable CS2 auto connect plugin with observer batching, queue protection,
  * fingerprint dedupe, automation recovery, improved fallback handling, keyword-based team filtering
  * to prevent false-positive connects to other teams' matches, steam:// URL as primary connect method,
  * suppressed duplicate error toasts, reconnect-loop prevention, and maximum-speed hot path.
+ *
+ * CHANGES IN v8.2 (absolute maximum speed — every microsecond saved):
+ *  - Steam fires directly in processMessageNode: the queue and its cooldown are completely bypassed
+ *    for steam:// connects — as soon as the message is parsed the URL fires synchronously.
+ *  - Cached steam method: after the first successful connect the working IPC method is stored so
+ *    subsequent connects skip all try/catch branches entirely.
+ *  - Pre-compiled regex: extract() patterns are compiled once at class load instead of on every call.
+ *  - textContent instead of innerText: avoids forced CSS/layout reflow on every message scan.
+ *  - O(1) queue dedup: queue.find() O(n) replaced with a Set for O(1) membership check.
+ *  - Default cooldown set to 0: no inter-connect sleep (was 500 ms).
+ *
+ * CHANGES IN v8.1:
+ *  - trySteamConnect 4-method fallback: electron shell → ipcRenderer → window.open → anchor click.
  *
  * CHANGES IN v8 (speed focus — competing against dedicated software):
  *  - O(1) fingerprint dedup: seenFingerprints array replaced with an in-memory Set for constant-time
@@ -21,6 +34,12 @@
  */
 
 module.exports = class CS2AutoConnect {
+  // v8.2: pre-compiled extract patterns — created once, not on every message scan
+  static EXTRACT_PATTERNS = [
+    /steam:\/\/connect\/([^\s/]+)(?:\/([^\s]+))?/i,
+    /\bconnect\s+((?:\d{1,3}\.){3}\d{1,3}:\d{2,5}|[a-z0-9.-]+:\d{2,5})\s*(?:;|\s)?\s*(?:(?:password|pass|pw)\s*[:=]?\s*(?:"([^"]+)"|'([^']+)'|([^\s;`]+)))?/i
+  ];
+
   constructor() {
     this.tag = "[CS2AutoConnect]";
 
@@ -46,11 +65,17 @@ module.exports = class CS2AutoConnect {
     // v8: Debounce timer handle for saveSettings — keeps disk I/O off the hot path.
     this._saveTimer = null;
 
+    // v8.2: Cache the first steam method that works. -1 = untested, 0-3 = method index.
+    // Once set, trySteamConnect jumps straight to the winning method with no try/catch overhead.
+    this._steamMethod = -1;
+
     this.observer = null;
     this.pendingNodes = new Set();
     this.observerFlushScheduled = false;
 
     this.queue = [];
+    // v8.2: O(1) dedup for the fallback queue (clipboard/AHK path)
+    this.queueFingerprints = new Set();
     this.processing = false;
     this.activeLaunch = false;
     this.lastLaunchAt = 0;
@@ -63,9 +88,8 @@ module.exports = class CS2AutoConnect {
 
     this.settings = {
       autoEnabled: true,
-      // v7: reduced from 5000 → 500 ms for faster sim-priority connects.
-      // Set to 0 to fire with no inter-connect delay (not recommended if you share a channel).
-      cooldown: 500,
+      // v8.2: 0 ms — steam:// fires synchronously so no delay is needed between connects.
+      cooldown: 0,
       debug: false,
       retryAttempts: 3,
       // v7: reduced from 700 → 200 ms between retry attempts.
@@ -102,7 +126,7 @@ module.exports = class CS2AutoConnect {
 
       this.bootstrapInitialMessages();
 
-      BdApi.UI.showToast("CS2AutoConnect v8.1 active", { type: "success" });
+      BdApi.UI.showToast("CS2AutoConnect v8.2 active", { type: "success" });
 
       this.log("plugin started");
     } catch (e) {
@@ -123,6 +147,7 @@ module.exports = class CS2AutoConnect {
 
       this.pendingNodes.clear();
       this.queue = [];
+      this.queueFingerprints.clear();
       this.processing = false;
       this.activeLaunch = false;
       this.failedToastAddresses.clear();
@@ -339,6 +364,19 @@ module.exports = class CS2AutoConnect {
 
       if (markOnly || !this.settings.autoEnabled) return;
 
+      // v8.2: DIRECT STEAM FIRE — skip the queue entirely for the steam:// path.
+      // trySteamConnect is synchronous; if it succeeds we're done in this microtask
+      // with zero queue overhead, zero cooldown sleep, zero scheduling delay.
+      if (!this.connectedAddresses.has(info.address)) {
+        const steamOk = this.trySteamConnect(info);
+        if (steamOk) {
+          this.connectedAddresses.add(info.address);
+          BdApi.UI.showToast(`Auto connect → ${info.address}`, { type: "success" });
+          return;
+        }
+      }
+
+      // Steam unavailable — fall back to the AHK/clipboard queue
       this.enqueue(info, fingerprint);
     } catch (e) {
       this.log("processMessageNode failed", e);
@@ -347,7 +385,8 @@ module.exports = class CS2AutoConnect {
 
   extractText(node) {
     try {
-      return (node.innerText || "").replace(/\u00A0/g, " ").trim();
+      // v8.2: textContent avoids forced CSS/layout reflow that innerText triggers
+      return (node.textContent || "").replace(/\u00A0/g, " ").trim();
     } catch {
       return null;
     }
@@ -390,13 +429,8 @@ module.exports = class CS2AutoConnect {
       .replace(/\s+/g, " ")
       .trim();
 
-    const patterns = [
-      /steam:\/\/connect\/([^\s/]+)(?:\/([^\s]+))?/i,
-
-      /\bconnect\s+((?:\d{1,3}\.){3}\d{1,3}:\d{2,5}|[a-z0-9.-]+:\d{2,5})\s*(?:;|\s)?\s*(?:(?:password|pass|pw)\s*[:=]?\s*(?:"([^"]+)"|'([^']+)'|([^\s;`]+)))?/i
-    ];
-
-    for (const pattern of patterns) {
+    // v8.2: use pre-compiled static patterns — no regex construction on every call
+    for (const pattern of CS2AutoConnect.EXTRACT_PATTERNS) {
       const match = cleaned.match(pattern);
       if (!match) continue;
 
@@ -434,8 +468,10 @@ module.exports = class CS2AutoConnect {
   // ─────────────────────────────────────────────────
 
   enqueue(info, fingerprint) {
-    if (this.queue.find(q => q.fingerprint === fingerprint)) return;
+    // v8.2: O(1) Set lookup replaces O(n) queue.find()
+    if (this.queueFingerprints.has(fingerprint)) return;
 
+    this.queueFingerprints.add(fingerprint);
     this.queue.push({ info, fingerprint, attempts: 0 });
 
     // v7: if the queue processor is idle AND enough time has passed since the last launch,
@@ -450,6 +486,7 @@ module.exports = class CS2AutoConnect {
 
     while (this.queue.length > 0) {
       const item = this.queue.shift();
+      this.queueFingerprints.delete(item.fingerprint);
 
       const elapsed = Date.now() - this.lastLaunchAt;
 
@@ -465,6 +502,7 @@ module.exports = class CS2AutoConnect {
 
         if (!success && item.attempts < this.settings.retryAttempts) {
           item.attempts++;
+          this.queueFingerprints.add(item.fingerprint);
           this.queue.push(item);
         }
 
@@ -539,61 +577,74 @@ module.exports = class CS2AutoConnect {
    * Opens a steam://connect/<ip>:<port>/<password> URL so Steam/CS2 connects
    * directly without any clipboard interaction.
    *
-   * v8.1: tries four methods in order so at least one succeeds in every
-   * Discord version:
-   *   1. electron.shell.openExternal   (Discord ≤ 0.0.309 / Electron 22)
-   *   2. ipcRenderer.invoke('open-url') (Discord with context isolation)
-   *   3. window.open(url)              (renderer fallback)
-   *   4. invisible <a> click           (last-resort DOM trick)
+   * v8.2: after the first successful connect the winning method index is cached
+   * in this._steamMethod so subsequent calls jump straight to it with zero
+   * try/catch overhead — as fast as a direct function call.
+   *
+   * Methods tried in order:
+   *   0. electron.shell.openExternal   (Discord ≤ 0.0.309 / Electron 22)
+   *   1. ipcRenderer.invoke('openExternal') (Discord with context isolation)
+   *   2. window.open(url)              (renderer fallback)
+   *   3. invisible <a> click           (last-resort DOM trick)
    */
   trySteamConnect(info) {
     let url = `steam://connect/${info.address}`;
     if (info.password) url += `/${encodeURIComponent(info.password)}`;
 
-    // ── Method 1: electron shell (most common in Discord) ─────────────────
-    try {
-      const electron = require("electron");
-      const shell = electron?.shell || electron?.remote?.shell;
-      if (shell?.openExternal) {
-        shell.openExternal(url);
-        this.log("trySteamConnect [shell]:", url);
+    // v8.2: fast path — jump straight to the method that worked last time
+    if (this._steamMethod >= 0) {
+      const ok = this._fireSteamMethod(this._steamMethod, url);
+      if (ok) {
+        this.log(`trySteamConnect [cached method ${this._steamMethod}]:`, url);
         return true;
       }
-    } catch {}
+      // cached method stopped working (e.g. Discord reloaded) — fall through to probe
+      this._steamMethod = -1;
+    }
 
-    // ── Method 2: ipcRenderer open-url (newer Discord with context isolation)
-    try {
-      const { ipcRenderer } = require("electron");
-      if (ipcRenderer) {
-        // Discord exposes 'openExternal' over IPC in recent builds
-        ipcRenderer.invoke("openExternal", url).catch(() => {});
-        this.log("trySteamConnect [ipcRenderer]:", url);
+    // Probe all methods in order, cache the first winner
+    for (let i = 0; i <= 3; i++) {
+      if (this._fireSteamMethod(i, url)) {
+        this._steamMethod = i;
+        this.log(`trySteamConnect [method ${i}]:`, url);
         return true;
       }
-    } catch {}
-
-    // ── Method 3: window.open ─────────────────────────────────────────────
-    try {
-      if (window?.open) {
-        window.open(url, "_blank");
-        this.log("trySteamConnect [window.open]:", url);
-        return true;
-      }
-    } catch {}
-
-    // ── Method 4: invisible anchor click ──────────────────────────────────
-    try {
-      const a = document.createElement("a");
-      a.href = url;
-      a.style.display = "none";
-      document.body.appendChild(a);
-      a.click();
-      setTimeout(() => a.remove(), 1000);
-      this.log("trySteamConnect [anchor]:", url);
-      return true;
-    } catch {}
+    }
 
     this.log("trySteamConnect: all methods failed");
+    return false;
+  }
+
+  /** Execute one of the 4 steam open methods. Returns true on success. */
+  _fireSteamMethod(index, url) {
+    try {
+      switch (index) {
+        case 0: {
+          const electron = require("electron");
+          const shell = electron?.shell || electron?.remote?.shell;
+          if (shell?.openExternal) { shell.openExternal(url); return true; }
+          break;
+        }
+        case 1: {
+          const { ipcRenderer } = require("electron");
+          if (ipcRenderer) { ipcRenderer.invoke("openExternal", url).catch(() => {}); return true; }
+          break;
+        }
+        case 2: {
+          if (window?.open) { window.open(url, "_blank"); return true; }
+          break;
+        }
+        case 3: {
+          const a = document.createElement("a");
+          a.href = url;
+          a.style.display = "none";
+          document.body.appendChild(a);
+          a.click();
+          setTimeout(() => a.remove(), 1000);
+          return true;
+        }
+      }
+    } catch {}
     return false;
   }
   // ────────────────────────────────────────────────────────────────────────
@@ -774,9 +825,11 @@ module.exports = class CS2AutoConnect {
 
     // v7: when toggling OFF, reset the connected-addresses guard so that
     // toggling back ON allows a fresh connect to any server.
+    // v8.2: also reset the steam method cache in case Discord reloaded.
     if (!this.settings.autoEnabled) {
       this.connectedAddresses.clear();
       this.failedToastAddresses.clear();
+      this._steamMethod = -1;
     }
 
     this.saveSettings();
