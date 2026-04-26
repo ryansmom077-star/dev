@@ -1,11 +1,22 @@
 /**
  * @name CS2AutoConnect
  * @author codex + upgraded
- * @version 8.2.0
+ * @version 8.3.0
  * @description Ultra reliable CS2 auto connect plugin with observer batching, queue protection,
  * fingerprint dedupe, automation recovery, improved fallback handling, keyword-based team filtering
  * to prevent false-positive connects to other teams' matches, steam:// URL as primary connect method,
  * suppressed duplicate error toasts, reconnect-loop prevention, and maximum-speed hot path.
+ *
+ * CHANGES IN v8.3 (pre-connect — connect before the last map is chosen):
+ *  - Pattern 3 "labeled server format": catches early match-setup bot messages that post the server
+ *    as  "Server: IP:PORT"  or  "IP: 1.2.3.4:27015 | Password: abc"  before map veto starts.
+ *    These messages appear as soon as the server is reserved — often 60-90 s before the final
+ *    "match ready / connect now" message that existing pattern 2 already handles.
+ *  - Pattern 4 "bare IP:PORT last resort": catches any valid IP:PORT pair in any message context.
+ *    extractNearbyPassword() scans adjacent text for a password keyword to go with the address.
+ *    validateTarget() still sanitises and range-checks, so false positives are filtered out.
+ *  - extract() updated to call extractNearbyPassword() when pattern 4 matches and no password
+ *    was captured inline.
  *
  * CHANGES IN v8.2 (absolute maximum speed — every microsecond saved):
  *  - Steam fires directly in processMessageNode: the queue and its cooldown are completely bypassed
@@ -35,9 +46,24 @@
 
 module.exports = class CS2AutoConnect {
   // v8.2: pre-compiled extract patterns — created once, not on every message scan
+  // v8.3: patterns 3 & 4 added for pre-connect (fires before the last map is chosen)
   static EXTRACT_PATTERNS = [
+    // 1. steam:// URL — highest confidence, direct protocol handler
     /steam:\/\/connect\/([^\s/]+)(?:\/([^\s]+))?/i,
-    /\bconnect\s+((?:\d{1,3}\.){3}\d{1,3}:\d{2,5}|[a-z0-9.-]+:\d{2,5})\s*(?:;|\s)?\s*(?:(?:password|pass|pw)\s*[:=]?\s*(?:"([^"]+)"|'([^']+)'|([^\s;`]+)))?/i
+
+    // 2. Explicit CS2 console connect command — "connect IP:PORT; password pw"
+    /\bconnect\s+((?:\d{1,3}\.){3}\d{1,3}:\d{2,5}|[a-z0-9.-]+:\d{2,5})\s*(?:;|\s)?\s*(?:(?:password|pass|pw)\s*[:=]?\s*(?:"([^"]+)"|'([^']+)'|([^\s;`]+)))?/i,
+
+    // 3. Labeled server format — catches early match-setup bot messages / embed fields:
+    //    "Server: 1.2.3.4:27015"  |  "IP: 1.2.3.4:27015 | Password: abc"
+    //    "Host: 1.2.3.4:27015 | Pass: abc"  |  "Address: server.host:27015"
+    //    This fires as soon as the server is reserved — before map veto starts.
+    /(?:server|ip(?:\s+address)?|address|host)[:\s]+([^\s|/,`"]+:\d{2,5})(?:.{0,120}?(?:password|pass|pw)[:\s]+([^\s|,`"\n]+))?/i,
+
+    // 4. Bare IP:PORT — last resort, catches any valid IP:PORT pair in any context.
+    //    extractNearbyPassword() looks for a password keyword adjacent to this address.
+    //    validateTarget() still sanitises IPs and checks the port range.
+    /\b((?:\d{1,3}\.){3}\d{1,3}:\d{2,5})\b/
   ];
 
   constructor() {
@@ -126,7 +152,7 @@ module.exports = class CS2AutoConnect {
 
       this.bootstrapInitialMessages();
 
-      BdApi.UI.showToast("CS2AutoConnect v8.2 active", { type: "success" });
+      BdApi.UI.showToast("CS2AutoConnect v8.3 active", { type: "success" });
 
       this.log("plugin started");
     } catch (e) {
@@ -430,17 +456,34 @@ module.exports = class CS2AutoConnect {
       .trim();
 
     // v8.2: use pre-compiled static patterns — no regex construction on every call
-    for (const pattern of CS2AutoConnect.EXTRACT_PATTERNS) {
-      const match = cleaned.match(pattern);
+    // v8.3: patterns 3 & 4 enable pre-connect before map veto completes
+    const patterns = CS2AutoConnect.EXTRACT_PATTERNS;
+    for (let i = 0; i < patterns.length; i++) {
+      const match = cleaned.match(patterns[i]);
       if (!match) continue;
 
-      return {
-        address: (match[1] || "").trim(),
-        password: (match[2] || match[3] || match[4] || "").trim() || null
-      };
+      const address = (match[1] || "").trim();
+      let password = (match[2] || match[3] || match[4] || "").trim() || null;
+
+      // v8.3: for the bare IP:PORT pattern (index 3) no inline password group exists —
+      // scan nearby text for a password keyword instead.
+      if (i === 3 && !password) {
+        password = this.extractNearbyPassword(cleaned) || null;
+      }
+
+      return { address, password };
     }
 
     return null;
+  }
+
+  // v8.3: scan text for a password keyword that may appear near a bare IP:PORT.
+  // Handles "Password: abc", "pass abc", "pw=abc", quoted or unquoted values.
+  extractNearbyPassword(text) {
+    const m = text.match(
+      /(?:password|pass|pw)[:\s=]+(?:"([^"]+)"|'([^']+)'|([^\s|,`";\n]+))/i
+    );
+    return m ? (m[1] || m[2] || m[3] || "").trim() : null;
   }
 
   validateTarget(info) {
