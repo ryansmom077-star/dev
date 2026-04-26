@@ -1,7 +1,7 @@
 /**
  * @name CS2AutoConnect
  * @author codex + upgraded
- * @version 8.0.0
+ * @version 8.1.0
  * @description Ultra reliable CS2 auto connect plugin with observer batching, queue protection,
  * fingerprint dedupe, automation recovery, improved fallback handling, keyword-based team filtering
  * to prevent false-positive connects to other teams' matches, steam:// URL as primary connect method,
@@ -102,7 +102,7 @@ module.exports = class CS2AutoConnect {
 
       this.bootstrapInitialMessages();
 
-      BdApi.UI.showToast("CS2AutoConnect v8 active", { type: "success" });
+      BdApi.UI.showToast("CS2AutoConnect v8.1 active", { type: "success" });
 
       this.log("plugin started");
     } catch (e) {
@@ -534,34 +534,67 @@ module.exports = class CS2AutoConnect {
     return false;
   }
 
-  // ── v6: Steam URL connect (most reliable, tried FIRST) ──────────────────
+  // ── Steam URL connect — no clipboard, no AHK, direct server join ────────
   /**
-   * Opens a steam://connect/ URL which causes Steam to launch CS2 and
-   * connect to the server directly — no AHK or PowerShell required.
-   * Format: steam://connect/<ip>:<port>/<password>
+   * Opens a steam://connect/<ip>:<port>/<password> URL so Steam/CS2 connects
+   * directly without any clipboard interaction.
+   *
+   * v8.1: tries four methods in order so at least one succeeds in every
+   * Discord version:
+   *   1. electron.shell.openExternal   (Discord ≤ 0.0.309 / Electron 22)
+   *   2. ipcRenderer.invoke('open-url') (Discord with context isolation)
+   *   3. window.open(url)              (renderer fallback)
+   *   4. invisible <a> click           (last-resort DOM trick)
    */
   trySteamConnect(info) {
+    let url = `steam://connect/${info.address}`;
+    if (info.password) url += `/${encodeURIComponent(info.password)}`;
+
+    // ── Method 1: electron shell (most common in Discord) ─────────────────
     try {
       const electron = require("electron");
       const shell = electron?.shell || electron?.remote?.shell;
-
-      if (!shell?.openExternal) {
-        this.log("trySteamConnect: electron shell not available");
-        return false;
+      if (shell?.openExternal) {
+        shell.openExternal(url);
+        this.log("trySteamConnect [shell]:", url);
+        return true;
       }
+    } catch {}
 
-      let url = `steam://connect/${info.address}`;
-      if (info.password) url += `/${encodeURIComponent(info.password)}`;
+    // ── Method 2: ipcRenderer open-url (newer Discord with context isolation)
+    try {
+      const { ipcRenderer } = require("electron");
+      if (ipcRenderer) {
+        // Discord exposes 'openExternal' over IPC in recent builds
+        ipcRenderer.invoke("openExternal", url).catch(() => {});
+        this.log("trySteamConnect [ipcRenderer]:", url);
+        return true;
+      }
+    } catch {}
 
-      shell.openExternal(url);
+    // ── Method 3: window.open ─────────────────────────────────────────────
+    try {
+      if (window?.open) {
+        window.open(url, "_blank");
+        this.log("trySteamConnect [window.open]:", url);
+        return true;
+      }
+    } catch {}
 
-      this.log("trySteamConnect:", url);
-
+    // ── Method 4: invisible anchor click ──────────────────────────────────
+    try {
+      const a = document.createElement("a");
+      a.href = url;
+      a.style.display = "none";
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(() => a.remove(), 1000);
+      this.log("trySteamConnect [anchor]:", url);
       return true;
-    } catch (e) {
-      this.log("trySteamConnect failed", e);
-      return false;
-    }
+    } catch {}
+
+    this.log("trySteamConnect: all methods failed");
+    return false;
   }
   // ────────────────────────────────────────────────────────────────────────
 
