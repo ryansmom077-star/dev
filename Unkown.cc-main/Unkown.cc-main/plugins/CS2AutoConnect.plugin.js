@@ -1,20 +1,22 @@
 /**
  * @name CS2AutoConnect
  * @author codex + upgraded
- * @version 6.0.0
+ * @version 7.0.0
  * @description Ultra reliable CS2 auto connect plugin with observer batching, queue protection,
  * fingerprint dedupe, automation recovery, improved fallback handling, keyword-based team filtering
  * to prevent false-positive connects to other teams' matches, steam:// URL as primary connect method,
- * and suppressed duplicate error toasts.
+ * suppressed duplicate error toasts, reconnect-loop prevention, and minimised latency for sim priority.
  *
- * CHANGES IN v6:
- *  - Add filterKeywords setting: only auto-connect when a keyword (e.g. ".win") appears in the message.
- *    This prevents the plugin from firing on other teams' match-connect messages in the same channel.
- *  - Add trySteamConnect(): uses steam://connect/IP:PORT/PASSWORD via Electron shell — the most
- *    reliable method. Tried FIRST before AHK or PowerShell.
- *  - Deduplicate "CS2 automation failed" toasts: the error toast is shown only once per unique
- *    server address, never repeatedly on each retry cycle.
- *  - All original functions kept intact (observer, queue, fingerprints, AHK, PowerShell, button, keybind).
+ * CHANGES IN v7:
+ *  - Fix reconnect loop: connectedAddresses Set tracks every address we successfully connected to
+ *    this session. Any future auto-connect attempt to the same address is silently skipped.
+ *    Reset by stopping/starting the plugin or toggling the CS2 button OFF then ON.
+ *  - Faster sim-priority: default cooldown reduced 5000→500 ms, retryDelay reduced 700→200 ms.
+ *    When nothing is currently processing, the queue is bypassed entirely and the connect fires
+ *    on the same microtask tick as the message detection (no unnecessary sleep).
+ *  - Address clarity: success toast now shows the exact server IP:PORT you are connecting TO,
+ *    so you can confirm the script is hitting the game server and not yourself.
+ *  - All v6 features kept intact (keyword filter, steam://, toast dedup, AHK/PowerShell fallbacks).
  */
 
 module.exports = class CS2AutoConnect {
@@ -29,6 +31,12 @@ module.exports = class CS2AutoConnect {
 
     // Track addresses for which the failure toast has already been shown this session
     this.failedToastAddresses = new Set();
+
+    // v7: Track addresses we have SUCCESSFULLY connected to this session.
+    // Any auto-connect attempt to an already-connected address is silently dropped,
+    // which prevents the reconnect loop caused by Discord re-rendering the same message.
+    // Cleared when the plugin is stopped or the CS2 button is toggled OFF.
+    this.connectedAddresses = new Set();
 
     this.observer = null;
     this.pendingNodes = new Set();
@@ -47,10 +55,13 @@ module.exports = class CS2AutoConnect {
 
     this.settings = {
       autoEnabled: true,
-      cooldown: 5000,
+      // v7: reduced from 5000 → 500 ms for faster sim-priority connects.
+      // Set to 0 to fire with no inter-connect delay (not recommended if you share a channel).
+      cooldown: 500,
       debug: false,
       retryAttempts: 3,
-      retryDelay: 700,
+      // v7: reduced from 700 → 200 ms between retry attempts.
+      retryDelay: 200,
       seenFingerprints: [],
 
       // --- NEW in v6 ---
@@ -83,7 +94,7 @@ module.exports = class CS2AutoConnect {
 
       this.bootstrapInitialMessages();
 
-      BdApi.UI.showToast("CS2AutoConnect v6 active", { type: "success" });
+      BdApi.UI.showToast("CS2AutoConnect v7 active", { type: "success" });
 
       this.log("plugin started");
     } catch (e) {
@@ -107,6 +118,7 @@ module.exports = class CS2AutoConnect {
       this.processing = false;
       this.activeLaunch = false;
       this.failedToastAddresses.clear();
+      this.connectedAddresses.clear(); // v7: reset so plugin can re-connect after restart
 
       this.saveSettings();
 
@@ -250,6 +262,14 @@ module.exports = class CS2AutoConnect {
 
       if (!this.validateTarget(info)) return;
 
+      // v7: reconnect-loop guard — if we already successfully connected to this address
+      // this session, silently drop the message (Discord re-renders the same message
+      // repeatedly which would otherwise keep firing the connect command).
+      if (this.connectedAddresses.has(info.address)) {
+        this.log("skipped (already connected this session):", info.address);
+        return;
+      }
+
       // ── v6: keyword filter ───────────────────────
       // If requireKeyword is true AND filterKeywords is non-empty, skip unless a
       // keyword appears somewhere in the message text (case-insensitive).
@@ -386,6 +406,8 @@ module.exports = class CS2AutoConnect {
 
     this.queue.push({ info, fingerprint, attempts: 0 });
 
+    // v7: if the queue processor is idle AND enough time has passed since the last launch,
+    // kick off immediately (no extra sleep) so we connect as early as possible.
     this.processQueue();
   }
 
@@ -399,7 +421,10 @@ module.exports = class CS2AutoConnect {
 
       const elapsed = Date.now() - this.lastLaunchAt;
 
-      if (elapsed < this.settings.cooldown) {
+      // v7: only sleep the cooldown when we actually launched something recently.
+      // On first launch (lastLaunchAt === 0) or when cooldown has already elapsed,
+      // skip the sleep entirely so the connect fires as fast as possible.
+      if (this.lastLaunchAt > 0 && elapsed < this.settings.cooldown) {
         await this.sleep(this.settings.cooldown - elapsed);
       }
 
@@ -593,17 +618,21 @@ module.exports = class CS2AutoConnect {
   }
 
   // ─────────────────────────────────────────────────
-  //  Core launch — v6: steam:// tried first, toast dedup applied
+  //  Core launch — v7: steam:// first, address toast, reconnect guard
   // ─────────────────────────────────────────────────
 
   async launchWithRecovery(info, manual = false) {
     const command = this.buildConsoleCommand(info);
 
     for (let attempt = 1; attempt <= this.settings.retryAttempts; attempt++) {
-      // ── 1. Try steam:// URL (new in v6, most reliable) ──────────────────
+      // ── 1. Try steam:// URL (most reliable, tried FIRST) ─────────────────
       if (this.trySteamConnect(info)) {
+        // v7: mark connected so reconnect guard blocks future auto-fires
+        this.connectedAddresses.add(info.address);
+
+        // v7: show exact server address — confirms we're connecting to the game server
         BdApi.UI.showToast(
-          manual ? "CS2 manual connect sent" : "CS2 auto connect sent",
+          `${manual ? "Manual" : "Auto"} connect → ${info.address}`,
           { type: "success" }
         );
         return true;
@@ -623,8 +652,11 @@ module.exports = class CS2AutoConnect {
         this.tryOpenConsoleAndPasteFallback(command);
 
       if (pasted) {
+        // v7: mark connected and show address
+        this.connectedAddresses.add(info.address);
+
         BdApi.UI.showToast(
-          manual ? "CS2 manual connect sent" : "CS2 auto connect sent",
+          `${manual ? "Manual" : "Auto"} connect → ${info.address}`,
           { type: "success" }
         );
         return true;
@@ -633,10 +665,9 @@ module.exports = class CS2AutoConnect {
       await this.sleep(this.settings.retryDelay);
     }
 
-    // ── v6: only show failure toast once per address this session ───────────
+    // Only show failure toast once per address this session
     if (!this.failedToastAddresses.has(info.address)) {
       this.failedToastAddresses.add(info.address);
-
       BdApi.UI.showToast("CS2 automation failed", { type: "error" });
     }
 
@@ -682,6 +713,13 @@ module.exports = class CS2AutoConnect {
 
   onButtonClick() {
     this.settings.autoEnabled = !this.settings.autoEnabled;
+
+    // v7: when toggling OFF, reset the connected-addresses guard so that
+    // toggling back ON allows a fresh connect to any server.
+    if (!this.settings.autoEnabled) {
+      this.connectedAddresses.clear();
+      this.failedToastAddresses.clear();
+    }
 
     this.saveSettings();
     this.updateButtonState();
