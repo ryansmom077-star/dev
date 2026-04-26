@@ -1,22 +1,23 @@
 /**
  * @name CS2AutoConnect
  * @author codex + upgraded
- * @version 7.0.0
+ * @version 8.0.0
  * @description Ultra reliable CS2 auto connect plugin with observer batching, queue protection,
  * fingerprint dedupe, automation recovery, improved fallback handling, keyword-based team filtering
  * to prevent false-positive connects to other teams' matches, steam:// URL as primary connect method,
- * suppressed duplicate error toasts, reconnect-loop prevention, and minimised latency for sim priority.
+ * suppressed duplicate error toasts, reconnect-loop prevention, and maximum-speed hot path.
  *
- * CHANGES IN v7:
- *  - Fix reconnect loop: connectedAddresses Set tracks every address we successfully connected to
- *    this session. Any future auto-connect attempt to the same address is silently skipped.
- *    Reset by stopping/starting the plugin or toggling the CS2 button OFF then ON.
- *  - Faster sim-priority: default cooldown reduced 5000→500 ms, retryDelay reduced 700→200 ms.
- *    When nothing is currently processing, the queue is bypassed entirely and the connect fires
- *    on the same microtask tick as the message detection (no unnecessary sleep).
- *  - Address clarity: success toast now shows the exact server IP:PORT you are connecting TO,
- *    so you can confirm the script is hitting the game server and not yourself.
- *  - All v6 features kept intact (keyword filter, steam://, toast dedup, AHK/PowerShell fallbacks).
+ * CHANGES IN v8 (speed focus — competing against dedicated software):
+ *  - O(1) fingerprint dedup: seenFingerprints array replaced with an in-memory Set for constant-time
+ *    lookup. The array is kept only for persistence; the Set is what's checked at runtime.
+ *  - Removed saveSettings() from hot path: disk writes are now debounced 1 s after the last match
+ *    so JSON serialisation never blocks the connect from firing.
+ *  - Short-circuit launch: steam availability is probed once; if the electron shell is present the
+ *    entire retry loop is bypassed and openExternal fires on the first synchronous call.
+ *    If steam is unavailable, falls straight through to clipboard/AHK without wasting iterations.
+ *  - Zero-delay clipboard retries: removed the 50 ms sleep between clipboard method attempts so
+ *    all three methods are tried back-to-back with no artificial wait.
+ *  - All v7 fixes kept: reconnect-loop guard, zero cooldown on first launch, address toast.
  */
 
 module.exports = class CS2AutoConnect {
@@ -37,6 +38,13 @@ module.exports = class CS2AutoConnect {
     // which prevents the reconnect loop caused by Discord re-rendering the same message.
     // Cleared when the plugin is stopped or the CS2 button is toggled OFF.
     this.connectedAddresses = new Set();
+
+    // v8: In-memory O(1) fingerprint Set. Populated from the persisted array on load.
+    // Runtime checks use this Set; the array is only kept for persistence across restarts.
+    this.seenFingerprintsSet = new Set();
+
+    // v8: Debounce timer handle for saveSettings — keeps disk I/O off the hot path.
+    this._saveTimer = null;
 
     this.observer = null;
     this.pendingNodes = new Set();
@@ -94,7 +102,7 @@ module.exports = class CS2AutoConnect {
 
       this.bootstrapInitialMessages();
 
-      BdApi.UI.showToast("CS2AutoConnect v7 active", { type: "success" });
+      BdApi.UI.showToast("CS2AutoConnect v8 active", { type: "success" });
 
       this.log("plugin started");
     } catch (e) {
@@ -118,7 +126,13 @@ module.exports = class CS2AutoConnect {
       this.processing = false;
       this.activeLaunch = false;
       this.failedToastAddresses.clear();
-      this.connectedAddresses.clear(); // v7: reset so plugin can re-connect after restart
+      this.connectedAddresses.clear();
+
+      // v8: flush any pending debounced save immediately on stop
+      if (this._saveTimer) {
+        clearTimeout(this._saveTimer);
+        this._saveTimer = null;
+      }
 
       this.saveSettings();
 
@@ -139,6 +153,9 @@ module.exports = class CS2AutoConnect {
       if (saved && typeof saved === "object") {
         this.settings = { ...this.settings, ...saved };
       }
+
+      // v8: rebuild the O(1) Set from the persisted array so runtime lookups are instant
+      this.seenFingerprintsSet = new Set(this.settings.seenFingerprints);
     } catch (e) {
       this.log("settings load failed", e);
     }
@@ -150,6 +167,16 @@ module.exports = class CS2AutoConnect {
     } catch (e) {
       this.log("settings save failed", e);
     }
+  }
+
+  // v8: debounced variant — schedules a single write 1 s after the last call.
+  // Use this on the hot path so JSON serialisation never delays a connect.
+  saveSettingsDebounced() {
+    if (this._saveTimer) clearTimeout(this._saveTimer);
+    this._saveTimer = setTimeout(() => {
+      this._saveTimer = null;
+      this.saveSettings();
+    }, 1000);
   }
 
   // ─────────────────────────────────────────────────
@@ -293,15 +320,20 @@ module.exports = class CS2AutoConnect {
 
       this.messageFingerprints.set(id, fingerprint);
 
-      if (this.settings.seenFingerprints.includes(fingerprint)) return;
+      // v8: O(1) Set lookup instead of O(n) array .includes()
+      if (this.seenFingerprintsSet.has(fingerprint)) return;
 
+      this.seenFingerprintsSet.add(fingerprint);
       this.settings.seenFingerprints.push(fingerprint);
 
       if (this.settings.seenFingerprints.length > 3000) {
         this.settings.seenFingerprints = this.settings.seenFingerprints.slice(-1500);
+        // rebuild Set to match trimmed array
+        this.seenFingerprintsSet = new Set(this.settings.seenFingerprints);
       }
 
-      this.saveSettings();
+      // v8: debounced save — disk I/O no longer blocks the connect from firing
+      this.saveSettingsDebounced();
 
       this.lastFound = info;
 
@@ -496,7 +528,7 @@ module.exports = class CS2AutoConnect {
         return true;
       } catch {}
 
-      await this.sleep(50);
+      // v8: no artificial sleep — all three methods tried back-to-back immediately
     }
 
     return false;
@@ -618,51 +650,44 @@ module.exports = class CS2AutoConnect {
   }
 
   // ─────────────────────────────────────────────────
-  //  Core launch — v7: steam:// first, address toast, reconnect guard
+  //  Core launch — v8: probe steam once, short-circuit, no redundant retries
   // ─────────────────────────────────────────────────
 
   async launchWithRecovery(info, manual = false) {
+    const label = manual ? "Manual" : "Auto";
+
+    // ── v8: check steam availability ONCE before any loop ──────────────────
+    // If electron shell is present, openExternal is a synchronous fire-and-forget
+    // call — no loop needed, no fallback attempted, connect fires immediately.
+    const steamOk = this.trySteamConnect(info);
+
+    if (steamOk) {
+      this.connectedAddresses.add(info.address);
+      BdApi.UI.showToast(`${label} connect → ${info.address}`, { type: "success" });
+      return true;
+    }
+
+    // ── Steam unavailable — fall back to clipboard + AHK/PowerShell ────────
     const command = this.buildConsoleCommand(info);
 
     for (let attempt = 1; attempt <= this.settings.retryAttempts; attempt++) {
-      // ── 1. Try steam:// URL (most reliable, tried FIRST) ─────────────────
-      if (this.trySteamConnect(info)) {
-        // v7: mark connected so reconnect guard blocks future auto-fires
-        this.connectedAddresses.add(info.address);
-
-        // v7: show exact server address — confirms we're connecting to the game server
-        BdApi.UI.showToast(
-          `${manual ? "Manual" : "Auto"} connect → ${info.address}`,
-          { type: "success" }
-        );
-        return true;
-      }
-
-      // ── 2. Copy to clipboard ─────────────────────────────────────────────
       const copied = await this.copyToClipboard(command);
 
-      if (!copied) {
+      if (copied) {
+        const pasted =
+          this.tryRunAhkPaste() ||
+          this.tryOpenConsoleAndPasteFallback(command);
+
+        if (pasted) {
+          this.connectedAddresses.add(info.address);
+          BdApi.UI.showToast(`${label} connect → ${info.address}`, { type: "success" });
+          return true;
+        }
+      }
+
+      if (attempt < this.settings.retryAttempts) {
         await this.sleep(this.settings.retryDelay);
-        continue;
       }
-
-      // ── 3. Try AHK then PowerShell ───────────────────────────────────────
-      const pasted =
-        this.tryRunAhkPaste() ||
-        this.tryOpenConsoleAndPasteFallback(command);
-
-      if (pasted) {
-        // v7: mark connected and show address
-        this.connectedAddresses.add(info.address);
-
-        BdApi.UI.showToast(
-          `${manual ? "Manual" : "Auto"} connect → ${info.address}`,
-          { type: "success" }
-        );
-        return true;
-      }
-
-      await this.sleep(this.settings.retryDelay);
     }
 
     // Only show failure toast once per address this session
