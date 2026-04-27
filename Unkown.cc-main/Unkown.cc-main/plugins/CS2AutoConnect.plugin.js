@@ -1,11 +1,22 @@
 /**
  * @name CS2AutoConnect
  * @author codex + upgraded
- * @version 8.3.0
+ * @version 8.4.0
  * @description Ultra reliable CS2 auto connect plugin with observer batching, queue protection,
  * fingerprint dedupe, automation recovery, improved fallback handling, keyword-based team filtering
  * to prevent false-positive connects to other teams' matches, steam:// URL as primary connect method,
  * suppressed duplicate error toasts, reconnect-loop prevention, and maximum-speed hot path.
+ *
+ * CHANGES IN v8.4 (startup delay — prevent premature connects on early-reservation patterns):
+ *  - startupDelay setting (default 35 000 ms): when a server address is detected via Pattern 3
+ *    ("labeled server format") or Pattern 4 ("bare IP:PORT"), the actual connect is deferred by
+ *    this many milliseconds so the game server has time to finish starting up.  Patterns 1
+ *    (steam://) and 2 (explicit connect command) are bot-confirmed-ready signals and still fire
+ *    with zero delay.
+ *  - _fireConnect(info): shared connect-fire method used by both the immediate and delayed paths.
+ *  - _pendingDelays: Set of pending setTimeout handles; all cancelled on stop() or button toggle-OFF
+ *    so no ghost connects fire after the plugin is disabled.
+ *  - extract() now returns patternIndex (0-3) so callers know which pattern fired.
  *
  * CHANGES IN v8.3 (pre-connect — connect before the last map is chosen):
  *  - Pattern 3 "labeled server format": catches early match-setup bot messages that post the server
@@ -95,6 +106,9 @@ module.exports = class CS2AutoConnect {
     // Once set, trySteamConnect jumps straight to the winning method with no try/catch overhead.
     this._steamMethod = -1;
 
+    // v8.4: pending startup-delay timers (for Pattern 3 & 4 deferred connects)
+    this._pendingDelays = new Set();
+
     this.observer = null;
     this.pendingNodes = new Set();
     this.observerFlushScheduled = false;
@@ -130,7 +144,13 @@ module.exports = class CS2AutoConnect {
 
       // When true, auto-connect is ONLY attempted if at least one filterKeyword matches.
       // When false (default) the keywords act as a soft hint and all commands fire.
-      requireKeyword: false
+      requireKeyword: false,
+
+      // v8.4: milliseconds to wait before firing a connect that was detected via
+      // Pattern 3 (labeled server format) or Pattern 4 (bare IP:PORT).  These patterns
+      // fire at server-reservation time — up to 90 s before the server is ready.
+      // Set to 0 to disable the delay.  Patterns 1 & 2 always fire immediately.
+      startupDelay: 35000
     };
 
     this.onKeyDown = this.onKeyDown.bind(this);
@@ -152,7 +172,7 @@ module.exports = class CS2AutoConnect {
 
       this.bootstrapInitialMessages();
 
-      BdApi.UI.showToast("CS2AutoConnect v8.3 active", { type: "success" });
+      BdApi.UI.showToast("CS2AutoConnect v8.4 active", { type: "success" });
 
       this.log("plugin started");
     } catch (e) {
@@ -178,6 +198,10 @@ module.exports = class CS2AutoConnect {
       this.activeLaunch = false;
       this.failedToastAddresses.clear();
       this.connectedAddresses.clear();
+
+      // v8.4: cancel any pending startup-delay timers
+      for (const tid of this._pendingDelays) clearTimeout(tid);
+      this._pendingDelays.clear();
 
       // v8: flush any pending debounced save immediately on stop
       if (this._saveTimer) {
@@ -390,6 +414,28 @@ module.exports = class CS2AutoConnect {
 
       if (markOnly || !this.settings.autoEnabled) return;
 
+      // v8.4: Pattern 3 & 4 fire at reservation time — defer the connect so the
+      // game server has time to finish starting up.  Patterns 0 & 1 are
+      // bot-confirmed-ready signals and always fire immediately.
+      if (info.patternIndex >= 2 && this.settings.startupDelay > 0) {
+        const delaySec = Math.round(this.settings.startupDelay / 1000);
+        BdApi.UI.showToast(`Server detected — connecting in ${delaySec}s…`, { type: "info" });
+        const tid = setTimeout(() => {
+          this._pendingDelays.delete(tid);
+          this._fireConnect(info);
+        }, this.settings.startupDelay);
+        this._pendingDelays.add(tid);
+        return;
+      }
+
+      this._fireConnect(info);
+    } catch (e) {
+      this.log("processMessageNode failed", e);
+    }
+  }
+
+  // v8.4: shared connect-fire logic used by both the immediate and delayed paths.
+  _fireConnect(info) {
       // v8.2: DIRECT STEAM FIRE — skip the queue entirely for the steam:// path.
       // trySteamConnect is synchronous; if it succeeds we're done in this microtask
       // with zero queue overhead, zero cooldown sleep, zero scheduling delay.
@@ -403,10 +449,7 @@ module.exports = class CS2AutoConnect {
       }
 
       // Steam unavailable — fall back to the AHK/clipboard queue
-      this.enqueue(info, fingerprint);
-    } catch (e) {
-      this.log("processMessageNode failed", e);
-    }
+      this.enqueue(info, this.buildFingerprint("_fire", info.address, info));
   }
 
   extractText(node) {
@@ -471,7 +514,7 @@ module.exports = class CS2AutoConnect {
         password = this.extractNearbyPassword(cleaned) || null;
       }
 
-      return { address, password };
+      return { address, password, patternIndex: i };
     }
 
     return null;
@@ -869,10 +912,13 @@ module.exports = class CS2AutoConnect {
     // v7: when toggling OFF, reset the connected-addresses guard so that
     // toggling back ON allows a fresh connect to any server.
     // v8.2: also reset the steam method cache in case Discord reloaded.
+    // v8.4: cancel any pending startup-delay timers.
     if (!this.settings.autoEnabled) {
       this.connectedAddresses.clear();
       this.failedToastAddresses.clear();
       this._steamMethod = -1;
+      for (const tid of this._pendingDelays) clearTimeout(tid);
+      this._pendingDelays.clear();
     }
 
     this.saveSettings();
